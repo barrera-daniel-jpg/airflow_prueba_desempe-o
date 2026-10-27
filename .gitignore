@@ -9,7 +9,6 @@
 # 2. Datos y Datasets Voluminosos
 # ==========================================
 # Los archivos de entrada y sus derivados pueden ser voluminosos o contener datos sensibles.
-data/raw/**
 !data/raw/.gitkeep
 data/processed/
 data/staging/

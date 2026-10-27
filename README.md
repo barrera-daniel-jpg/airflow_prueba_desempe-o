@@ -201,27 +201,132 @@ El puerto publicado por defecto para PostgreSQL del DWH es `5433` en el host (`5
 
 ## Ejecución
 
-En Windows PowerShell, desde la raíz del proyecto:
+Sigue estos pasos desde la raíz del repositorio en Windows PowerShell. La API consulta el Data Warehouse; no lee los CSV directamente. Por eso, el ETL debe terminar correctamente antes de validar productos.
+
+### 1. Preparar los requisitos
+
+Inicia Docker Desktop y confirma que Docker Compose está disponible:
 
 ```powershell
+docker compose version
+```
+
+### 2. Revisar los archivos de entrada
+
+Comprueba que los archivos estén en `data/raw/` y que sus nombres coincidan exactamente:
+
+```text
+data/raw/Transacciones de ventas.csv
+data/raw/Historial extendido de transacciones.csv
+```
+
+La primera fuente es obligatoria; el histórico es opcional. Si los datos no están en el equipo, deben obtenerse por el canal autorizado del proyecto; Git los excluye del repositorio.
+
+### 3. Configurar el entorno
+
+Si todavía no existe `.env`, crea una copia de la plantilla y edítala:
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
+```
+
+Completa los usuarios, contraseñas y nombres de las bases de datos. En `AIRFLOW_CONN_POSTGRES_DW`, la conexión dentro de Docker debe usar el host `postgres-dw` y el puerto interno `5432`, por ejemplo `postgresql://dw_admin:TU_CLAVE@postgres-dw:5432/datamart_dw`. No uses las contraseñas de ejemplo en un entorno compartido. Guarda `.env` localmente; no se debe subir a Git.
+
+### 4. Levantar los servicios y ejecutar el pipeline
+
+Ejecuta el script automatizado:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 .\run_pipeline.ps1
 ```
 
-El script prepara directorios, levanta los servicios, espera a las dependencias, aplica el esquema, copia los CSV al contenedor del scheduler, dispara el DAG y ejecuta las consultas SQL al terminar. El archivo `.env` debe estar configurado antes de ejecutar el proceso.
+El script construye y levanta los contenedores, espera a PostgreSQL, Airflow y la API, aplica el esquema DWH, copia los CSV al scheduler, dispara `datamart_etl_daily_pipeline`, espera el estado final y ejecuta las consultas analíticas. Al terminar correctamente, debe indicar que las tareas finalizaron en verde.
 
-Para levantar los servicios manualmente:
+Para revisar el estado de los servicios en otra terminal:
 
 ```powershell
-docker compose up -d --build
+docker compose ps
 ```
 
-Luego se puede disparar el DAG desde la interfaz de Airflow (`http://localhost:8080`) o desde el contenedor scheduler:
+Airflow queda disponible en `http://localhost:8080`. El script ya dispara el DAG; no lo dispares de nuevo si esa ejecución sigue en curso. Si prefieres levantar los servicios manualmente, ejecuta `docker compose up -d --build` y dispara el DAG desde Airflow o con:
 
 ```powershell
+docker exec airflow-scheduler airflow dags unpause datamart_etl_daily_pipeline
 docker exec airflow-scheduler airflow dags trigger datamart_etl_daily_pipeline
 ```
 
-La interfaz de Airflow usa el usuario/contraseña configurados para el usuario inicial. La API y su documentación OpenAPI se publican en los enlaces siguientes.
+Espera a que el DAG termine en estado `success` antes de probar el catálogo. Si falla, consulta `docker compose logs -f airflow-scheduler` y el log de la tarea fallida en Airflow.
+
+### 5. Validar la API sin consultar los CSV
+
+La API escucha en `http://localhost:8000`. Los ejemplos siguientes consultan el catálogo cargado en `dwh.dim_products`; no requieren abrir ni parsear los archivos fuente.
+
+Valida primero que el servicio responda:
+
+```powershell
+Invoke-RestMethod -Uri 'http://localhost:8000/health'
+```
+
+Respuesta esperada:
+
+```json
+{
+	"status": "healthy",
+	"service": "catalog-api"
+}
+```
+
+Consulta un producto conocido por código:
+
+```powershell
+$product = Invoke-RestMethod -Uri 'http://localhost:8000/products/85123A'
+$product | ConvertTo-Json -Depth 5
+```
+
+Con los datos de ejemplo, la respuesta debe incluir el código `85123A` y el nombre `White Hanging Heart T-Light Holder`:
+
+```json
+{
+	"code": "85123A",
+	"name": "White Hanging Heart T-Light Holder",
+	"category": "Hogar",
+	"country_origin": "Reino Unido",
+	"status": "activo"
+}
+```
+
+Consulta varias filas con paginación y filtra por estado:
+
+```powershell
+$page = Invoke-RestMethod -Uri 'http://localhost:8000/products?page=1&limit=5&status=activo'
+$page | ConvertTo-Json -Depth 5
+```
+
+La respuesta contiene `total`, `page`, `limit`, `total_pages` y `data`. Para comprobar que un código desconocido devuelve `404`:
+
+```powershell
+try {
+		Invoke-RestMethod -Uri 'http://localhost:8000/products/CODIGO_INEXISTENTE' -ErrorAction Stop
+} catch {
+		$_.Exception.Response.StatusCode
+}
+```
+
+La respuesta debe mostrar `NotFound`. También puedes explorar las llamadas desde Swagger UI en `http://localhost:8000/docs`.
+
+Si `/health` no responde, verifica que `api` esté activo con `docker compose ps` y consulta sus logs con `docker compose logs -f api`. Si el health check responde pero `85123A` da `404`, confirma que el DAG terminó en `success` y cargó las dimensiones.
+
+### 6. Detener los servicios
+
+Al terminar las pruebas:
+
+```powershell
+docker compose down
+```
+
+Este comando detiene los contenedores y conserva los volúmenes del Data Warehouse y de los metadatos de Airflow.
 
 ## API
 
@@ -231,7 +336,7 @@ La interfaz de Airflow usa el usuario/contraseña configurados para el usuario i
 - `http://localhost:8000/docs`: Swagger UI.
 - `http://localhost:8000/redoc`: ReDoc.
 
-El listado acepta los parámetros `status` y `category`; a día de hoy `status` filtra por `is_active`, pero `category` no se aplica en la consulta. Además, las respuestas asignan actualmente `Hogar` y `Reino Unido` como valores fijos para categoría y origen, en vez de devolver los valores almacenados en las dimensiones.
+El listado acepta los parámetros `status` y `category`; `status` filtra por `is_active`, pero `category` no se aplica en la consulta. Además, las respuestas asignan actualmente `Hogar` y `Reino Unido` como valores fijos para categoría y origen, en vez de devolver los valores almacenados en las dimensiones.
 
 ## Notas conocidas
 

@@ -1,0 +1,112 @@
+# ==========================================
+# 1. Secretos y Entorno
+# ==========================================
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# 2. Datos y Datasets Voluminosos
+# ==========================================
+# Los archivos de entrada y sus derivados pueden ser voluminosos o contener datos sensibles.
+data/raw/**
+!data/raw/.gitkeep
+data/processed/
+data/staging/
+
+# ==========================================
+# 3. Apache Airflow (Logs, PID y Artefactos)
+# ==========================================
+/logs/*
+!logs/.gitkeep
+/airflow.cfg
+airflow.db
+webserver_config.py
+*.pid
+
+# ==========================================
+# 4. Python, Caché y Entornos Virtuales
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Entornos virtuales
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribución / Empaquetado
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================================
+# 5. Base de Datos Local y Volúmenes Docker
+# ==========================================
+*.sqlite3
+*.db
+pgdata/
+postgres_data/
+
+# ==========================================
+# 6. IDEs y Editores de Código
+# ==========================================
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+
+# ==========================================
+# 7. Archivos del Sistema Operativo
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop
+*.tmp
+*.swp
+~$*
+# Configuraciones autogeneradas de Airflow
+config/airflow.cfg
+airflow.cfg
+webserver_config.py
+config/webserver_config.py

@@ -1,0 +1,190 @@
+---
+x-airflow-common:
+  &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.1.5}
+  env_file:
+    - ${ENV_FILE_PATH:-.env}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    AIRFLOW_CONN_POSTGRES_DW: ${AIRFLOW_CONN_POSTGRES_DW:-postgresql://dw_admin:dw_secure_pass@postgres-dw:5432/datamart_dw}
+    AIRFLOW_VAR_RAW_DATA_PATH: ${AIRFLOW_VAR_RAW_DATA_PATH:-/opt/airflow/data/raw}
+    AIRFLOW_VAR_API_PRODUCT_URL: ${AIRFLOW_VAR_API_PRODUCT_URL:-http://catalog-api:8000/api/v1/products}
+    AIRFLOW_VAR_RETENTION_DAYS: ${AIRFLOW_VAR_RETENTION_DAYS:-365}
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/src:/opt/airflow/src
+    - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+    - ${AIRFLOW_PROJ_DIR:-.}/sql:/opt/airflow/sql
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    postgres-dw:
+      condition: service_healthy
+
+services:
+  # 1. Base de datos de Metadatos de Airflow
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-airflow
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_DB_USER:-airflow} -d ${AIRFLOW_DB_NAME:-airflow}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # 2. Base de datos ANALÍTICA (Data Warehouse destino DataMart)
+  postgres-dw:
+    image: postgres:16-alpine
+    container_name: postgres-dw
+    ports:
+      - "${DW_POSTGRES_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: ${DW_POSTGRES_USER:-dw_admin}
+      POSTGRES_PASSWORD: ${DW_POSTGRES_PASSWORD:-dw_secure_pass}
+      POSTGRES_DB: ${DW_POSTGRES_DB:-datamart_dw}
+    volumes:
+      - postgres-dw-volume:/var/lib/postgresql/data
+      - ./sql/init_dw.sql:/docker-entrypoint-initdb.d/init_dw.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DW_POSTGRES_USER:-dw_admin} -d ${DW_POSTGRES_DB:-datamart_dw}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # 3. Airflow API Server (Web UI)
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow-apiserver
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 4. Airflow Scheduler
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 5. Airflow DAG Processor
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 6. Airflow Triggerer
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 7. Airflow Init (Migración y Usuario)
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-admin}" \
+          --firstname Admin \
+          --lastname DataMart \
+          --role Admin \
+          --email admin@datamart.com || true
+
+  # 8. Analytical FastAPI Container
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: dwh-api
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DW_USER=${DW_POSTGRES_USER}
+      - DW_PASSWORD=${DW_POSTGRES_PASSWORD}
+      - DW_HOST=postgres-dw
+      - DW_PORT=5432
+      - DW_NAME=${DW_POSTGRES_DB}
+    depends_on:
+      postgres-dw:
+        condition: service_healthy
+    volumes:
+      - ./api:/app/api
+
+volumes:
+  postgres-db-volume:
+  postgres-dw-volume:
